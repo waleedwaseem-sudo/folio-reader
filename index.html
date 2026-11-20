@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Folio</title>
+<meta name="description" content="A quiet EPUB reader for your phone.">
+<meta name="theme-color" content="#FBFBF9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Folio">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 6h.01M3 12h.01M3 18h.01M8 6h13M8 12h13M8 18h13"/></symbol>
+    <symbol id="i-type" viewBox="0 0 24 24"><path d="M21 14h-5"/><path d="M16 16v-3.5a2.5 2.5 0 0 1 5 0V16"/><path d="M4.5 13h6"/><path d="m3 16 4.5-9 4.5 9"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+  </defs>
+</svg>
+
+<!-- Library -->
+<main id="library" class="library">
+  <header class="lib-head">
+    <h1>Library</h1>
+    <div class="lib-actions">
+      <button id="editBtn" class="text-btn" type="button" hidden>Edit</button>
+      <label class="icon-btn primary" aria-label="Add a book">
+        <svg class="ic"><use href="#i-plus"/></svg>
+        <input id="fileInput" type="file" multiple class="sr-only">
+      </label>
+    </div>
+  </header>
+
+  <p id="libError" class="banner" role="alert" hidden></p>
+  <div id="importing" class="progress-row" hidden>
+    <span id="importingText">Adding book…</span>
+    <div class="bar"><div id="importingBar" class="bar-fill"></div></div>
+  </div>
+
+  <section id="grid" class="grid" aria-live="polite"></section>
+
+  <div id="empty" class="empty" hidden>
+    <svg class="ic ic-lg"><use href="#i-book"/></svg>
+    <h2>No books yet</h2>
+    <p>Add an EPUB from Files, iCloud Drive or a download. Books stay on this phone and open offline.</p>
+    <label class="btn primary">
+      Add an EPUB
+      <input type="file" multiple class="sr-only fileInputAlt">
+    </label>
+  </div>
+</main>
+
+<!-- Reader -->
+<section id="reader" class="reader" hidden data-theme="white">
+  <div id="viewer" class="viewer"></div>
+  <div id="tapLayer" class="tap-layer" aria-hidden="true"></div>
+  <div id="readerLoading" class="reader-loading" hidden>
+    <div class="sk sk-line w60"></div><div class="sk sk-line"></div><div class="sk sk-line"></div><div class="sk sk-line w80"></div>
+    <div class="sk sk-line"></div><div class="sk sk-line w70"></div>
+  </div>
+  <p id="readerError" class="reader-error" role="alert" hidden></p>
+
+  <footer class="page-foot" aria-hidden="true">
+    <span id="footChapter" class="foot-chapter"></span>
+    <span id="footPct" class="foot-pct"></span>
+  </footer>
+
+  <div id="chrome" class="chrome" hidden>
+    <header class="top-bar">
+      <button id="closeBook" class="icon-btn" type="button" aria-label="Back to library"><svg class="ic"><use href="#i-back"/></svg></button>
+      <p id="bookTitle" class="top-title"></p>
+      <button id="tocBtn" class="icon-btn" type="button" aria-label="Contents"><svg class="ic"><use href="#i-list"/></svg></button>
+      <button id="typeBtn" class="icon-btn" type="button" aria-label="Text settings"><svg class="ic"><use href="#i-type"/></svg></button>
+    </header>
+    <div class="bottom-bar">
+      <label class="sr-only" for="scrub">Position in book</label>
+      <input id="scrub" type="range" min="0" max="1000" value="0" disabled>
+      <p id="scrubLabel" class="scrub-label">Working out pages…</p>
+    </div>
+  </div>
+
+  <!-- Contents sheet -->
+  <div id="tocSheet" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="tocTitle">
+    <div class="sheet-head">
+      <h2 id="tocTitle">Contents</h2>
+      <button class="icon-btn sheet-close" type="button" aria-label="Close contents"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <ol id="tocList" class="toc"></ol>
+  </div>
+
+  <!-- Type settings sheet -->
+  <div id="typeSheet" class="sheet sheet-short" hidden role="dialog" aria-modal="true" aria-labelledby="typeTitle">
+    <div class="sheet-head">
+      <h2 id="typeTitle">Text</h2>
+      <button class="icon-btn sheet-close" type="button" aria-label="Close text settings"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Size</span>
+      <div class="stepper">
+        <button id="sizeDown" class="icon-btn" type="button" aria-label="Smaller text"><svg class="ic"><use href="#i-minus"/></svg></button>
+        <output id="sizeOut">100%</output>
+        <button id="sizeUp" class="icon-btn" type="button" aria-label="Larger text"><svg class="ic"><use href="#i-plus"/></svg></button>
+      </div>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Typeface</span>
+      <div class="seg" role="radiogroup" aria-label="Typeface" data-key="font">
+        <button type="button" role="radio" data-value="literata" class="f-literata">Literata</button>
+        <button type="button" role="radio" data-value="newyork" class="f-newyork">New York</button>
+        <button type="button" role="radio" data-value="book">Original</button>
+      </div>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Spacing</span>
+      <div class="seg" role="radiogroup" aria-label="Line spacing" data-key="spacing">
+        <button type="button" role="radio" data-value="1.4">Tight</button>
+        <button type="button" role="radio" data-value="1.6">Normal</button>
+        <button type="button" role="radio" data-value="1.85">Loose</button>
+      </div>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Page</span>
+      <div class="seg swatches" role="radiogroup" aria-label="Page colour" data-key="theme">
+        <button type="button" role="radio" data-value="white" class="sw-white">White</button>
+        <button type="button" role="radio" data-value="paper" class="sw-paper">Paper</button>
+        <button type="button" role="radio" data-value="night" class="sw-night">Night</button>
+      </div>
+    </div>
+  </div>
+  <div id="scrim" class="scrim" hidden></div>
+</section>
+
+<script src="vendor/jszip.min.js"></script>
+<script src="vendor/epub.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
