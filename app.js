@@ -140,7 +140,11 @@
     if (e.target.closest(".book-delete")) {
       const b = await books.get(id);
       if (!b) return;
-      if (!confirm(`Remove “${b.title}” from this phone? Your reading position goes with it.`)) return;
+      const msg = b.driveId
+        ? `Remove “${b.title}” from this device? It stays in your Google Drive and won't download here again.`
+        : `Remove “${b.title}” from this device? Your reading position goes with it.`;
+      if (!confirm(msg)) return;
+      if (b.driveId) Sync.ignore(b.driveId);
       await files.del(id);
       await books.del(id);
       renderLibrary();
@@ -196,7 +200,11 @@
   }
 
   async function importOne(file) {
-    const buf = await file.arrayBuffer();
+    return importBuffer(await file.arrayBuffer(), file.name);
+  }
+
+  async function importBuffer(buf, name, extra = {}) {
+    const file = { name };
     const sig = new Uint8Array(buf, 0, 4);
     if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("Not a zip/EPUB file");
 
@@ -222,7 +230,9 @@
         lastOpened: 0,
         cfi: null,
         pct: 0,
+        posAt: 0,
         locations: null,
+        ...extra,
       });
     } finally {
       book.destroy();
@@ -406,7 +416,7 @@
     const ready = cur.book.locations.length() > 0;
     const pct = ready ? cur.book.locations.percentageFromCfi(loc.start.cfi) : null;
     updateFooter(pct);
-    const patch = { cfi: loc.start.cfi, lastOpened: Date.now() };
+    const patch = { cfi: loc.start.cfi, lastOpened: Date.now(), posAt: Date.now() };
     if (pct != null) patch.pct = loc.atEnd ? 1 : pct;
     clearTimeout(onRelocated.t);
     const id = cur.id;
@@ -438,9 +448,10 @@
       clearTimeout(onRelocated.t);
       const { id, location, book } = cur;
       if (location) {
-        const patch = { cfi: location.start.cfi, lastOpened: Date.now() };
+        const patch = { cfi: location.start.cfi, lastOpened: Date.now(), posAt: Date.now() };
         if (book.locations.length() > 0) patch.pct = location.atEnd ? 1 : book.locations.percentageFromCfi(location.start.cfi);
         await patchBook(id, patch);
+        Sync.pushPositions();
       }
       try { cur.rendition.destroy(); } catch { /* ignore */ }
       try { book.destroy(); } catch { /* ignore */ }
@@ -572,17 +583,290 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden" && cur && cur.location) {
       clearTimeout(onRelocated.t);
-      const patch = { cfi: cur.location.start.cfi, lastOpened: Date.now() };
+      const patch = { cfi: cur.location.start.cfi, lastOpened: Date.now(), posAt: Date.now() };
       if (cur.book.locations.length() > 0) patch.pct = cur.book.locations.percentageFromCfi(cur.location.start.cfi);
-      patchBook(cur.id, patch);
+      patchBook(cur.id, patch).then(() => Sync.pushPositions({ keepalive: true }));
     }
   });
+
+  /* ---------- Google Drive sync ---------- */
+  // Books: EPUBs in a folder called "Folio" in My Drive are downloaded to each device.
+  // Positions: a small positions.json in Folio's hidden app-data folder; the newest position wins.
+  const Sync = (() => {
+    const CLIENT_ID = (window.FOLIO_CONFIG || {}).googleClientId || "";
+    const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata";
+    const API = "https://www.googleapis.com/drive/v3";
+    const UP = "https://www.googleapis.com/upload/drive/v3";
+    const panel = $("#drivePanel");
+    const panelText = $("#driveText");
+    const connectBtn = $("#driveConnect");
+    const disconnectBtn = $("#driveDisconnect");
+    const syncBtn = $("#syncBtn");
+    const row = $("#syncRow");
+    const rowText = $("#syncText");
+    const rowBarWrap = $("#syncBarWrap");
+    const rowBar = $("#syncBar");
+    let busy = false;
+    let posFileId = null;
+    let pushChain = Promise.resolve();
+
+    const state = () => store.get("drive", { connected: false, lastSync: 0, needsTap: false });
+    const setState = (p) => store.set("drive", Object.assign(state(), p));
+    const token = () => {
+      const t = store.get("driveToken", null);
+      return t && t.exp > Date.now() + 60000 ? t.value : null;
+    };
+    const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, "");
+    const authErr = () => Object.assign(new Error("Google sign-in needed"), { auth: true });
+    const q = encodeURIComponent;
+    const sessionGet = (k) => { try { return sessionStorage.getItem(k); } catch { return null; } };
+    const sessionSet = (k, v) => { try { sessionStorage.setItem(k, v); } catch { /* ignore */ } };
+
+    function signIn(silent) {
+      const st = uid();
+      store.set("driveState", st);
+      const p = new URLSearchParams({
+        client_id: CLIENT_ID,
+        redirect_uri: redirectUri(),
+        response_type: "token",
+        scope: SCOPES,
+        include_granted_scopes: "true",
+        state: st,
+      });
+      if (silent) p.set("prompt", "none");
+      sessionSet("folio:silentTried", "1");
+      location.assign("https://accounts.google.com/o/oauth2/v2/auth?" + p);
+    }
+
+    function handleRedirect() {
+      if (!/[#&](access_token|error)=/.test(location.hash)) return;
+      const h = new URLSearchParams(location.hash.slice(1));
+      history.replaceState(null, "", location.pathname + location.search);
+      if (h.get("state") !== store.get("driveState", null)) return;
+      if (h.get("access_token")) {
+        store.set("driveToken", { value: h.get("access_token"), exp: Date.now() + (Number(h.get("expires_in")) || 3600) * 1000 });
+        setState({ connected: true, needsTap: false });
+      } else if (state().connected) {
+        setState({ needsTap: true });
+      } else {
+        message("Google Drive wasn't connected. Tap Connect Google Drive to try again.");
+      }
+    }
+
+    async function api(url, opts = {}) {
+      const t = token();
+      if (!t) throw authErr();
+      const res = await fetch(url, { ...opts, headers: { Authorization: "Bearer " + t, ...(opts.headers || {}) } });
+      if (res.status === 401) { store.set("driveToken", null); throw authErr(); }
+      if (!res.ok) throw Object.assign(new Error("Drive request failed: " + res.status), { status: res.status });
+      return res;
+    }
+
+    async function findFolder() {
+      const query = "name = 'Folio' and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
+      const r = await (await api(`${API}/files?q=${q(query)}&fields=files(id)&spaces=drive&pageSize=10`)).json();
+      return r.files && r.files[0] ? r.files[0].id : null;
+    }
+
+    async function listBooks(folderId) {
+      let out = [];
+      let pageToken = "";
+      do {
+        const query = `'${folderId}' in parents and trashed = false`;
+        const r = await (await api(`${API}/files?q=${q(query)}&fields=nextPageToken,files(id,name,mimeType)&pageSize=200${pageToken ? "&pageToken=" + q(pageToken) : ""}`)).json();
+        out = out.concat(r.files || []);
+        pageToken = r.nextPageToken || "";
+      } while (pageToken);
+      return out.filter((f) => /\.epub$/i.test(f.name) || f.mimeType === "application/epub+zip");
+    }
+
+    async function readRemote() {
+      if (!posFileId) {
+        const r = await (await api(`${API}/files?spaces=appDataFolder&q=${q("name = 'positions.json'")}&fields=files(id)`)).json();
+        posFileId = r.files && r.files[0] ? r.files[0].id : null;
+      }
+      if (!posFileId) return {};
+      try {
+        return await (await api(`${API}/files/${posFileId}?alt=media`)).json();
+      } catch (e) {
+        if (e.auth) throw e;
+        return {};
+      }
+    }
+
+    async function writeRemote(data, keepalive) {
+      if (!posFileId) {
+        const r = await (await api(`${API}/files?fields=id`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "positions.json", parents: ["appDataFolder"] }),
+        })).json();
+        posFileId = r.id;
+      }
+      await api(`${UP}/files/${posFileId}?uploadType=media`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+        keepalive: !!keepalive,
+      });
+    }
+
+    async function mergePositions({ keepalive = false } = {}) {
+      const remote = await readRemote();
+      const local = (await books.all()).filter((b) => b.driveId);
+      let changed = false;
+      for (const b of local) {
+        const r = remote[b.driveId];
+        const isOpen = cur && cur.id === b.id;
+        if (r && r.at > (b.posAt || 0) && !isOpen) {
+          await patchBook(b.id, { cfi: r.cfi, pct: r.pct || 0, posAt: r.at, lastOpened: Math.max(b.lastOpened || 0, r.at) });
+        } else if (b.cfi && b.posAt && (!r || b.posAt > r.at)) {
+          remote[b.driveId] = { cfi: b.cfi, pct: b.pct || 0, at: b.posAt, title: b.title };
+          changed = true;
+        }
+      }
+      if (changed) await writeRemote(remote, keepalive);
+    }
+
+    function pushPositions(opts) {
+      if (!CLIENT_ID || !state().connected || !token()) return Promise.resolve();
+      pushChain = pushChain.then(() => mergePositions(opts)).catch(() => { /* retried on next sync */ });
+      return pushChain;
+    }
+
+    function message(text) {
+      row.hidden = !text;
+      rowText.textContent = text || "";
+      rowBarWrap.hidden = true;
+    }
+
+    function progress(text, frac) {
+      row.hidden = false;
+      rowText.textContent = text;
+      rowBarWrap.hidden = frac == null;
+      if (frac != null) rowBar.style.transform = `scaleX(${frac})`;
+    }
+
+    async function sync({ interactive = false } = {}) {
+      if (!CLIENT_ID || !state().connected || busy) return;
+      if (!token()) {
+        if (interactive) signIn(false);
+        else message("Tap Sync to check Google Drive for new books.");
+        return;
+      }
+      busy = true;
+      syncBtn.disabled = true;
+      syncBtn.setAttribute("aria-label", "Syncing with Google Drive");
+      progress("Checking Google Drive…", null);
+      let note = "";
+      const failed = [];
+      try {
+        const folderId = await findFolder();
+        if (!folderId) {
+          note = "There's no folder called Folio in your Google Drive yet. Create one in My Drive, put your EPUBs in it, then tap Sync.";
+        } else {
+          const remote = await listBooks(folderId);
+          const all = await books.all();
+          const have = new Set(all.map((b) => b.driveId).filter(Boolean));
+          const ignored = new Set(store.get("driveIgnored", []));
+          const todo = remote.filter((f) => !have.has(f.id) && !ignored.has(f.id));
+          for (let i = 0; i < todo.length; i++) {
+            const f = todo[i];
+            progress(todo.length > 1 ? `Downloading book ${i + 1} of ${todo.length}…` : `Downloading ${f.name}…`, i / todo.length);
+            try {
+              const buf = await (await api(`${API}/files/${f.id}?alt=media`)).arrayBuffer();
+              await importBuffer(buf, f.name, { driveId: f.id });
+            } catch (e) {
+              if (e.auth) throw e;
+              failed.push(f.name);
+            }
+            renderLibrary();
+          }
+        }
+        progress("Syncing reading positions…", null);
+        await mergePositions();
+        setState(note ? { needsTap: false } : { lastSync: Date.now(), needsTap: false });
+      } catch (e) {
+        console.warn(e);
+        if (e.auth) {
+          setState({ needsTap: true });
+          note = "Your Google Drive sign-in has expired. Tap Sync to reconnect.";
+        } else if (!navigator.onLine) {
+          note = "You're offline, so Google Drive wasn't checked. Your books here still open.";
+        } else {
+          note = "Google Drive couldn't be reached. Tap Sync to try again.";
+        }
+      } finally {
+        busy = false;
+        syncBtn.disabled = false;
+        syncBtn.setAttribute("aria-label", "Sync with Google Drive");
+        message(note);
+        if (failed.length) showLibError(`${failed.join(", ")} couldn't be opened as ${failed.length === 1 ? "an EPUB" : "EPUBs"}. Check the ${failed.length === 1 ? "file isn't" : "files aren't"} damaged or DRM-protected.`);
+        renderPanel();
+        renderLibrary();
+      }
+    }
+
+    function when(ts) {
+      if (!ts) return "";
+      const d = new Date(ts);
+      const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      const today = new Date().toDateString() === d.toDateString();
+      return today ? `today at ${time}` : `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} at ${time}`;
+    }
+
+    function renderPanel() {
+      if (!CLIENT_ID) { panel.hidden = true; syncBtn.hidden = true; return; }
+      const s = state();
+      panel.hidden = false;
+      syncBtn.hidden = !s.connected;
+      connectBtn.hidden = s.connected;
+      disconnectBtn.hidden = !s.connected;
+      panelText.textContent = s.connected
+        ? (s.lastSync ? `Synced with Google Drive ${when(s.lastSync)}.` : "Connected to Google Drive.") + " New books in your Folio folder download here."
+        : "Sync books and reading positions across your devices. Put EPUBs in a folder called Folio in your Google Drive.";
+    }
+
+    async function disconnect() {
+      if (!confirm("Disconnect Google Drive? Books already on this device stay here.")) return;
+      const t = store.get("driveToken", null);
+      if (t) fetch("https://oauth2.googleapis.com/revoke?token=" + q(t.value), { method: "POST" }).catch(() => {});
+      store.set("driveToken", null);
+      store.set("drive", { connected: false, lastSync: 0, needsTap: false });
+      posFileId = null;
+      message("");
+      renderPanel();
+    }
+
+    function ignore(driveId) {
+      const list = store.get("driveIgnored", []);
+      if (!list.includes(driveId)) list.push(driveId);
+      store.set("driveIgnored", list);
+    }
+
+    function init() {
+      if (!CLIENT_ID) { renderPanel(); return; }
+      handleRedirect();
+      renderPanel();
+      connectBtn.addEventListener("click", () => signIn(false));
+      disconnectBtn.addEventListener("click", disconnect);
+      syncBtn.addEventListener("click", () => sync({ interactive: true }));
+      const s = state();
+      if (!s.connected) return;
+      if (token()) sync();
+      else if (!s.needsTap && navigator.onLine && !sessionGet("folio:silentTried")) signIn(true);
+      else message("Tap Sync to check Google Drive for new books.");
+    }
+
+    return { init, sync, pushPositions, ignore };
+  })();
 
   /* ---------- Boot ---------- */
   showSkeleton();
   applySettings({ relayout: false });
   setThemeColor(getComputedStyle(document.body).backgroundColor);
   renderLibrary();
+  Sync.init();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker.register("sw.js").catch(() => {});
