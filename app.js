@@ -177,30 +177,47 @@
     const failed = [];
     importing.hidden = false;
     for (let i = 0; i < list.length; i++) {
-      importingText.textContent = list.length > 1 ? `Adding book ${i + 1} of ${list.length}…` : "Adding book…";
+      const base = list.length > 1 ? `Adding book ${i + 1} of ${list.length}` : "Adding book";
+      importingText.textContent = base + "…";
       importingBar.style.transform = `scaleX(${i / list.length})`;
       try {
-        await importOne(list[i]);
+        await importAny(await list[i].arrayBuffer(), list[i].name, {}, (done, total) => {
+          importingText.textContent = `${base}: optimising PDF for reading, page ${Math.min(done + 1, total)} of ${total}…`;
+          importingBar.style.transform = `scaleX(${(i + done / total) / list.length})`;
+        });
       } catch (err) {
         console.warn(err);
-        failed.push(list[i].name);
+        failed.push({ name: list[i].name, why: err && err.userMessage });
       }
     }
     importingBar.style.transform = "scaleX(1)";
     importing.hidden = true;
     importingBar.style.transform = "scaleX(0)";
-    if (failed.length) {
-      showLibError(
-        failed.length === 1
-          ? `“${failed[0]}” couldn't be opened as an EPUB. Choose a file that ends in .epub and isn't DRM-protected.`
-          : `${failed.length} files couldn't be opened as EPUBs: ${failed.join(", ")}. Choose files that end in .epub and aren't DRM-protected.`
-      );
-    }
+    if (failed.length) showLibError(failMessage(failed));
     renderLibrary();
   }
 
-  async function importOne(file) {
-    return importBuffer(await file.arrayBuffer(), file.name);
+  function failMessage(failed) {
+    if (failed.length === 1) {
+      const f = failed[0];
+      return f.why
+        ? `“${f.name}” ${f.why}, so it couldn't be added.`
+        : `“${f.name}” couldn't be opened. Choose an EPUB or PDF that isn't DRM-protected.`;
+    }
+    return `${failed.length} files couldn't be opened: ${failed.map((f) => f.name).join(", ")}. Choose EPUBs or PDFs that aren't DRM- or password-protected.`;
+  }
+
+  const isPdf = (buf) => { const s = new Uint8Array(buf, 0, Math.min(1024, buf.byteLength)); for (let i = 0; i < s.length - 4; i++) if (s[i] === 0x25 && s[i + 1] === 0x50 && s[i + 2] === 0x44 && s[i + 3] === 0x46) return true; return false; };
+
+  // EPUBs are stored as they are; PDFs are converted to a reflowable book first.
+  async function importAny(buf, name, extra = {}, onProgress) {
+    const sig = new Uint8Array(buf, 0, 2);
+    if (sig[0] === 0x50 && sig[1] === 0x4b) return importBuffer(buf, name, extra);
+    if (isPdf(buf)) {
+      const epub = await window.FolioPDF.convert(buf, name, onProgress);
+      return importBuffer(epub, name.replace(/\.pdf$/i, ".epub"), { ...extra, source: "pdf" });
+    }
+    throw Object.assign(new Error("Unsupported file"), { userMessage: "isn't an EPUB or PDF" });
   }
 
   async function importBuffer(buf, name, extra = {}) {
@@ -270,7 +287,11 @@
       p, li, blockquote, dd, dt, div, span { line-height: ${settings.spacing} !important; }
       ${ff ? `body, p, div, span, li, blockquote, h1, h2, h3, h4, h5, h6, em, i, b, strong, a { font-family: ${ff} !important; }` : ""}
       a, a * { color: ${t.link} !important; }
-      img, svg, image { max-width: 100%; }
+      img, svg, image { max-width: 100%; height: auto; }
+      p, li, blockquote, dd { -webkit-hyphens: auto; hyphens: auto; widows: 2; orphans: 2; overflow-wrap: break-word; }
+      h1, h2, h3, h4 { -webkit-hyphens: manual; hyphens: manual; text-wrap: balance; break-after: avoid; }
+      pre, code { white-space: pre-wrap !important; overflow-wrap: anywhere; }
+      table { max-width: 100% !important; }
       ::selection { background: rgba(127,127,127,0.3); }
     `;
   }
@@ -677,7 +698,7 @@
         out = out.concat(r.files || []);
         pageToken = r.nextPageToken || "";
       } while (pageToken);
-      return out.filter((f) => /\.epub$/i.test(f.name) || f.mimeType === "application/epub+zip");
+      return out.filter((f) => /\.(epub|pdf)$/i.test(f.name) || f.mimeType === "application/epub+zip" || f.mimeType === "application/pdf");
     }
 
     async function readRemote() {
@@ -772,13 +793,15 @@
           const todo = remote.filter((f) => !have.has(f.id) && !ignored.has(f.id));
           for (let i = 0; i < todo.length; i++) {
             const f = todo[i];
-            progress(todo.length > 1 ? `Downloading book ${i + 1} of ${todo.length}…` : `Downloading ${f.name}…`, i / todo.length);
+            const base = todo.length > 1 ? `Downloading book ${i + 1} of ${todo.length}` : `Downloading ${f.name}`;
+            progress(base + "…", i / todo.length);
             try {
               const buf = await (await api(`${API}/files/${f.id}?alt=media`)).arrayBuffer();
-              await importBuffer(buf, f.name, { driveId: f.id });
+              await importAny(buf, f.name, { driveId: f.id }, (done, total) =>
+                progress(`${base}: optimising PDF for reading, page ${Math.min(done + 1, total)} of ${total}…`, (i + done / total) / todo.length));
             } catch (e) {
               if (e.auth) throw e;
-              failed.push(f.name);
+              failed.push({ name: f.name, why: e && e.userMessage });
             }
             renderLibrary();
           }
@@ -801,7 +824,7 @@
         syncBtn.disabled = false;
         syncBtn.setAttribute("aria-label", "Sync with Google Drive");
         message(note);
-        if (failed.length) showLibError(`${failed.join(", ")} couldn't be opened as ${failed.length === 1 ? "an EPUB" : "EPUBs"}. Check the ${failed.length === 1 ? "file isn't" : "files aren't"} damaged or DRM-protected.`);
+        if (failed.length) showLibError(failMessage(failed));
         renderPanel();
         renderLibrary();
       }
