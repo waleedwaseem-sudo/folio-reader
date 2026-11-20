@@ -15,7 +15,7 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Literata:ital,opsz,wght@0,7..72,400..700;1,7..72,400..700&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -145,6 +145,24 @@
       </div>
     </div>
     <div class="setting">
+      <span class="setting-label">Margins</span>
+      <div class="seg" role="radiogroup" aria-label="Page margins" data-key="margin">
+        <button type="button" role="radio" data-value="narrow">Narrow</button>
+        <button type="button" role="radio" data-value="normal">Normal</button>
+        <button type="button" role="radio" data-value="wide">Wide</button>
+      </div>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Alignment</span>
+      <div class="seg" role="radiogroup" aria-label="Text alignment" data-key="align">
+        <button type="button" role="radio" data-value="left">Left</button>
+        <button type="button" role="radio" data-value="justify">Justified</button>
+      </div>
+    </div>
+    <button id="boldToggle" class="setting switch-row switch" type="button" role="switch" aria-checked="false" data-key="bold">
+      <span class="setting-label">Bold text</span><span class="switch-track" aria-hidden="true"></span>
+    </button>
+    <div class="setting">
       <span class="setting-label">Page</span>
       <div class="seg swatches" role="radiogroup" aria-label="Page colour" data-key="theme">
         <button type="button" role="radio" data-value="white" class="sw-white">White</button>
@@ -152,6 +170,9 @@
         <button type="button" role="radio" data-value="night" class="sw-night">Night</button>
       </div>
     </div>
+    <button id="autoNightToggle" class="setting switch-row switch" type="button" role="switch" aria-checked="true" data-key="autoNight">
+      <span class="setting-label">Night when phone is in dark mode</span><span class="switch-track" aria-hidden="true"></span>
+    </button>
   </div>
   <div id="scrim" class="scrim" hidden></div>
 </section>

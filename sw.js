@@ -1,5 +1,5 @@
 /* Folio service worker: app shell offline, fonts cached on first use. */
-const VERSION = "folio-v3";
+const VERSION = "folio-v4";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "config.js", "pdf-convert.js", "vendor/pdf.min.js", "vendor/pdf.worker.min.js", "vendor/jszip.min.js", "vendor/epub.min.js",
   "manifest.webmanifest", "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];
 

@@ -276,6 +276,13 @@
         const src = bodyLines.length ? bodyLines : g;
         g.left = pct(src.map((l) => l.x), 0.1);
         g.right = pct(src.map((l) => l.xEnd), 0.9);
+        // Line spacing differs between parts of a document (front matter, quotes, notes), so measure it per block of text.
+        const local = [];
+        for (let i = 1; i < g.length; i++) {
+          const d = g[i - 1].y - g[i].y;
+          if (d > 0 && d < g[i].size * 3 && Math.abs(g[i].size - g[i - 1].size) < 0.6) local.push(d);
+        }
+        g.gap = local.length >= 3 ? Math.min(median(local), lineGap * 2) : lineGap;
         return g;
       });
     }
@@ -310,17 +317,27 @@
             continue;
           }
           const indented = L.x > g.left + body * 0.8 && L.x < g.left + body * 5;
-          let fresh = !para || para.type !== "p" || listStart.test(L.text);
-          if (!fresh && prev) {
-            const gap = prev.y - L.y;
-            if (gap > lineGap * 1.45) fresh = true;
+          const isList = listStart.test(L.text);
+          let fresh = !para || para.type !== "p" || isList;
+          const before = prev || (para && para.last);
+          // A sentence that is clearly still going never starts a new paragraph:
+          // the previous line ends in a hyphen, or ends without punctuation and this line carries on.
+          const gap = prev ? prev.y - L.y : 0;
+          const ended = before && /[.!?:;"”’)\]…]$/.test(before.text);
+          const carriesOn = !fresh && before && (
+            /[\p{L}]-$|\u00AD$/u.test(before.text) ||
+            (!ended && /^[\p{Ll}]/u.test(L.text)) ||
+            (!ended && before.xEnd >= (prev ? g.right : before.right) - body * 4 && (!prev || gap < g.gap * 2.5))
+          );
+          if (!fresh && !carriesOn && prev) {
+            if (gap > g.gap * 1.45) fresh = true;
             else if (indented) fresh = true;
-            else if (prev.xEnd < g.right - body * 4 && /[.!?:;"”’)\]]$/.test(prev.text)) fresh = true;
-          } else if (!fresh && !prev) {
+            else if (prev.xEnd < g.right - body * 4 && ended) fresh = true;
+          } else if (!fresh && !carriesOn && !prev) {
             // First line of a page or column: carry the paragraph over unless it clearly ended.
             const last = para.last;
             if (indented) fresh = true;
-            else if (last && /[.!?"”’]$/.test(last.text) && last.xEnd < last.right - body * 4) fresh = true;
+            else if (last && ended && last.xEnd < last.right - body * 4) fresh = true;
           }
           if (fresh) { flush(); para = { type: "p", text: L.text, page: p }; }
           else para.text = joinLine(para.text, L.text);
@@ -453,5 +470,6 @@
     return zip.generateAsync({ type: "arraybuffer", mimeType: "application/epub+zip" });
   }
 
-  window.FolioPDF = { convert };
+  // Bump when the conversion improves; books with a stored source PDF are re-converted on open.
+  window.FolioPDF = { convert, VERSION: 2 };
 })();

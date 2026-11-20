@@ -3,7 +3,7 @@
   "use strict";
 
   const $ = (s, r = document) => r.querySelector(s);
-  const FONT_CSS = "https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap";
+  const FONT_CSS = "https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400..700;1,7..72,400..700&display=swap";
   const THEMES = {
     white: { page: "#FFFFFF", ink: "#1C1D1F", link: "#2F5D8C" },
     paper: { page: "#F4EEE1", ink: "#3A3227", link: "#6B4E1F" },
@@ -146,6 +146,7 @@
       if (!confirm(msg)) return;
       if (b.driveId) Sync.ignore(b.driveId);
       await files.del(id);
+      await files.del(id + ":pdf");
       await books.del(id);
       renderLibrary();
       return;
@@ -215,12 +216,12 @@
     if (sig[0] === 0x50 && sig[1] === 0x4b) return importBuffer(buf, name, extra);
     if (isPdf(buf)) {
       const epub = await window.FolioPDF.convert(buf, name, onProgress);
-      return importBuffer(epub, name.replace(/\.pdf$/i, ".epub"), { ...extra, source: "pdf" });
+      return importBuffer(epub, name.replace(/\.pdf$/i, ".epub"), { ...extra, source: "pdf", convVer: window.FolioPDF.VERSION }, buf);
     }
     throw Object.assign(new Error("Unsupported file"), { userMessage: "isn't an EPUB or PDF" });
   }
 
-  async function importBuffer(buf, name, extra = {}) {
+  async function importBuffer(buf, name, extra = {}, srcPdf = null) {
     const file = { name };
     const sig = new Uint8Array(buf, 0, 4);
     if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("Not a zip/EPUB file");
@@ -237,6 +238,7 @@
 
       const id = uid();
       await files.put(id, buf);
+      if (srcPdf) await files.put(id + ":pdf", srcPdf);
       await books.put({
         id,
         title: (md.title || file.name.replace(/\.epub$/i, "")).trim(),
@@ -271,15 +273,25 @@
   const readerError = $("#readerError");
 
   const settings = Object.assign(
-    { size: 100, font: "literata", spacing: "1.6", theme: "white" },
+    { size: 100, font: "literata", spacing: "1.6", theme: "white", margin: "normal", align: "left", bold: false, autoNight: true, footer: "pct" },
     store.get("settings", {})
   );
 
   let cur = null; // { id, book, rendition, toc, location }
 
+  const MARGINS = { narrow: 16, normal: 24, wide: 40 };
+  const darkMQ = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  // Like Apple Books' auto-night theme: follow the phone's dark mode unless turned off.
+  const themeName = () => (settings.autoNight && darkMQ && darkMQ.matches ? "night" : settings.theme);
+  if (darkMQ && darkMQ.addEventListener) darkMQ.addEventListener("change", () => applySettings({ relayout: false }));
+
   function readerCss() {
-    const t = THEMES[settings.theme];
+    const t = THEMES[themeName()];
     const ff = FONTS[settings.font];
+    const weight = settings.bold ? 500 : 400;
+    const align = settings.align === "justify"
+      ? "p, li, dd, blockquote { text-align: justify !important; }"
+      : "p:not([class*=center]):not([style*=center]):not([align]), li, dd { text-align: left !important; }";
     return `
       html, body { background: transparent !important; color: ${t.ink} !important; }
       body { font-size: ${settings.size}% !important; -webkit-text-size-adjust: 100%; }
@@ -292,6 +304,9 @@
       h1, h2, h3, h4 { -webkit-hyphens: manual; hyphens: manual; text-wrap: balance; break-after: avoid; }
       pre, code { white-space: pre-wrap !important; overflow-wrap: anywhere; }
       table { max-width: 100% !important; }
+      ${align}
+      body, body *:not(b):not(strong):not(h1):not(h2):not(h3):not(h4):not(h5):not(h6):not(th) { font-weight: ${weight} !important; }
+      ${settings.bold ? "b, strong, h1, h2, h3, h4, h5, h6, th { font-weight: 700 !important; }" : ""}
       ::selection { background: rgba(127,127,127,0.3); }
     `;
   }
@@ -317,8 +332,11 @@
 
   function applySettings({ relayout = true } = {}) {
     store.set("settings", settings);
-    readerEl.dataset.theme = settings.theme;
-    setThemeColor(THEMES[settings.theme].page);
+    readerEl.dataset.theme = themeName();
+    readerEl.style.setProperty("--margin", MARGINS[settings.margin] + "px");
+    if (!readerEl.hidden) setThemeColor(THEMES[themeName()].page);
+    $("#boldToggle").setAttribute("aria-checked", String(!!settings.bold));
+    $("#autoNightToggle").setAttribute("aria-checked", String(!!settings.autoNight));
     $("#sizeOut").textContent = settings.size + "%";
     $("#sizeDown").disabled = settings.size <= 70;
     $("#sizeUp").disabled = settings.size >= 200;
@@ -358,8 +376,19 @@
     applySettings({ relayout: false });
 
     try {
-      const buf = await files.get(id);
+      let buf = await files.get(id);
       if (!buf) throw new Error("Book file missing");
+      if (meta.source === "pdf" && (meta.convVer || 1) < window.FolioPDF.VERSION) {
+        const src = await files.get(id + ":pdf");
+        if (src) {
+          try {
+            buf = await window.FolioPDF.convert(src, meta.title + ".pdf");
+            await files.put(id, buf);
+            await patchBook(id, { convVer: window.FolioPDF.VERSION, locations: null });
+            meta.locations = null;
+          } catch (e) { console.warn("Re-conversion failed; using the earlier version", e); }
+        }
+      }
       const book = ePub(buf);
       await book.ready;
       const rendition = book.renderTo(viewer, {
@@ -431,9 +460,74 @@
     return best;
   }
 
+  /* Reading speed, learnt from how long you spend on each page (like Kindle's time-left estimates). */
+  const speed = Object.assign({ secsPerPage: 45, samples: 0 }, store.get("speed", {}));
+  let lastTurn = null;
+  function learnSpeed(loc) {
+    const now = Date.now();
+    const d = loc.start.displayed;
+    if (lastTurn && d && lastTurn.href === loc.start.href && d.page === lastTurn.page + 1) {
+      const secs = (now - lastTurn.t) / 1000;
+      if (secs > 3 && secs < 300) {
+        const w = speed.samples < 10 ? 1 / (speed.samples + 1) : 0.1;
+        speed.secsPerPage = speed.secsPerPage * (1 - w) + secs * w;
+        speed.samples++;
+        store.set("speed", speed);
+      }
+    }
+    lastTurn = d ? { t: now, page: d.page, href: loc.start.href } : null;
+  }
+
+  function locationCounts() {
+    if (cur.locCounts || !cur.book.locations.length()) return cur.locCounts;
+    const counts = new Map();
+    for (const c of cur.book.locations._locations || []) {
+      const m = /^epubcfi\(\/6\/(\d+)/.exec(c);
+      if (m) counts.set(+m[1], (counts.get(+m[1]) || 0) + 1);
+    }
+    cur.locCounts = counts;
+    return counts;
+  }
+
+  function fmtTime(secs, where) {
+    const m = Math.round(secs / 60);
+    if (m < 1) return `Less than a minute left in ${where}`;
+    if (m < 60) return `${m} min left in ${where}`;
+    const h = Math.floor(m / 60), mm = m % 60;
+    return `${h} h${mm ? ` ${mm} min` : ""} left in ${where}`;
+  }
+
+  function timeLeft(loc, scope) {
+    const d = loc.start.displayed;
+    if (!d) return "";
+    const pagesInChapter = Math.max(0, d.total - d.page);
+    if (scope === "chapter") return fmtTime((pagesInChapter + 1) * speed.secsPerPage, "chapter");
+    const counts = locationCounts();
+    const m = /^epubcfi\(\/6\/(\d+)/.exec(loc.start.cfi);
+    if (!counts || !m) return "";
+    const here = +m[1];
+    const pagesPerLoc = d.total / Math.max(1, counts.get(here) || 1);
+    let after = 0;
+    counts.forEach((n, k) => { if (k > here) after += n; });
+    return fmtTime((pagesInChapter + 1 + after * pagesPerLoc) * speed.secsPerPage, "book");
+  }
+
+  const FOOTER_MODES = ["pct", "chapter", "book", "none"];
+  function footerText(pct) {
+    const loc = cur && cur.location;
+    if (!loc) return "";
+    switch (settings.footer) {
+      case "chapter": return timeLeft(loc, "chapter");
+      case "book": return cur.book.locations.length() ? timeLeft(loc, "book") : "Working out time left…";
+      case "none": return "";
+      default: return pct != null ? Math.round(pct * 100) + "%" : "";
+    }
+  }
+
   function onRelocated(loc) {
     if (!cur) return;
     cur.location = loc;
+    learnSpeed(loc);
     const ready = cur.book.locations.length() > 0;
     const pct = ready ? cur.book.locations.percentageFromCfi(loc.start.cfi) : null;
     updateFooter(pct);
@@ -450,7 +544,7 @@
     const loc = cur && cur.location;
     if (pct == null && cur && cur.book.locations.length() > 0 && loc) pct = cur.book.locations.percentageFromCfi(loc.start.cfi);
     if (loc && loc.atEnd) pct = 1;
-    footPct.textContent = pct != null ? Math.round(pct * 100) + "%" : "";
+    footPct.textContent = footerText(pct);
     if (pct != null && !scrub.matches(":active")) scrub.value = Math.round(pct * 1000);
 
     let left = "";
@@ -508,8 +602,16 @@
     }
     if (Math.abs(dx) > 12 || Math.abs(dy) > 12) return;
     if (!chrome.hidden) { hideChrome(); return; }
+    const rect = tap.getBoundingClientRect();
+    if (e.clientY > rect.bottom - 56 && cur && cur.location) {
+      // Tap the bottom line to cycle progress: percent, time left in chapter, time left in book, nothing.
+      settings.footer = FOOTER_MODES[(FOOTER_MODES.indexOf(settings.footer) + 1) % FOOTER_MODES.length];
+      store.set("settings", settings);
+      updateFooter();
+      return;
+    }
     const w = tap.clientWidth;
-    const x = e.clientX - tap.getBoundingClientRect().left;
+    const x = e.clientX - rect.left;
     if (x < w * 0.3) prev();
     else if (x > w * 0.7) next();
     else showChrome();
@@ -576,6 +678,13 @@
       const key = seg.dataset.key;
       settings[key] = b.dataset.value;
       applySettings({ relayout: key !== "theme" });
+    });
+  });
+  document.querySelectorAll(".switch").forEach((sw) => {
+    sw.addEventListener("click", () => {
+      const key = sw.dataset.key;
+      settings[key] = !settings[key];
+      applySettings({ relayout: key === "bold" });
     });
   });
 
